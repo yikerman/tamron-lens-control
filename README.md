@@ -47,6 +47,8 @@ tlc button get
 # Assign Focus Preset to the Focus Set Button
 tlc button set focus function focus-preset
 
+## some more.. see tlc --help
+
 # Fine-tune autofocus accuracy
 tlc focus-calibration set 2
 ```
