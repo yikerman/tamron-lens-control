@@ -11,27 +11,27 @@
 
 Build and install from this repository with a recent Rust toolchain:
 
-```console
+```bash
 cargo install --path .
 ```
 
 Connect the lens directly over USB, then confirm that `tlc` can see it:
 
-```console
+```bash
 tlc devices
 tlc info
 ```
 
 When several lenses are connected, select one by the serial number or port shown by `tlc devices`:
 
-```console
+```bash
 tlc --device SERIAL info
 tlc --device /dev/ttyUSB0 info
 ```
 
 ## Use
 
-```console
+```bash
 ## Each command connects to the lens, performs one action, and disconnects.
 ## Note that a lens may support only a subset of them.
 
@@ -59,7 +59,7 @@ Place `-v` before the command to show each operation sent to the lens, and `-vv`
 
 Back up all current settings before making extensive changes:
 
-```console
+```bash
 tlc settings save my-lens.tlc
 tlc settings load my-lens.tlc
 ```
@@ -75,7 +75,7 @@ told to use the `cp210x` USB serial driver for it.
 
 Use these commands to test the driver setup immediately:
 
-```console
+```bash
 sudo modprobe cp210x
 echo 2cd1 0002 | sudo tee /sys/bus/usb-serial/drivers/cp210x/new_id
 echo 2cd1 0005 | sudo tee /sys/bus/usb-serial/drivers/cp210x/new_id
@@ -83,13 +83,13 @@ echo 2cd1 0005 | sudo tee /sys/bus/usb-serial/drivers/cp210x/new_id
 
 Reconnect the lens and check for its serial port:
 
-```console
+```bash
 tlc devices
 ```
 
 If `/dev/ttyUSB0` exists but cannot be opened, grant your current user temporary access:
 
-```console
+```bash
 sudo setfacl -m u:"$USER":rw /dev/ttyUSB0
 ```
 
@@ -97,7 +97,7 @@ sudo setfacl -m u:"$USER":rw /dev/ttyUSB0
 
 Create one udev rule that registers the Tamron USB IDs and grants the active desktop user access whenever a compatible lens is connected:
 
-```console
+```bash
 sudoedit /etc/udev/rules.d/70-tamron-lens.rules
 ```
 
@@ -112,7 +112,7 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="2cd1", ATTRS{idProduct}=="0005", TAG+="uacce
 
 Reload the rules, then unplug and reconnect the lens:
 
-```console
+```bash
 sudo udevadm control --reload-rules
 # reconnect
 tlc devices && tlc info
@@ -121,13 +121,13 @@ getfacl /dev/ttyUSB0
 
 For SSH or a headless system, `uaccess` may not apply. Check the device group:
 
-```console
+```bash
 stat -c '%G' /dev/ttyUSB0
 ```
 
 If it reports `dialout`, add your user to that group and log out completely:
 
-```console
+```bash
 sudo usermod -aG dialout "$USER"
 ```
 
