@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
 crc = "3.4.0"
+ctrlc = "3.5.2"
 log = "0.4.33"
+quick-xml = "0.41.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
 serialport = "4.9.0"
-thiserror = "2.0.19"
+thiserror = "2.0.20"

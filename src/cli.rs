@@ -7,7 +7,8 @@ use std::{
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use log::{LevelFilter, Log, Metadata, Record};
 use tamron_lens_control::{
-    AfLimit, ButtonFunction, ButtonSlot, Error, FocusRingDirection, FocusRingFunction,
+    AfLimit, ButtonFunction, ButtonSlot, Error, FirmwareMetadata, FirmwareProgress,
+    FirmwareUpdateControl, FirmwareUpdateOutcome, FocusRingDirection, FocusRingFunction,
     FocusRingResponse, Lens, Result, RingSetting, SettingChange, SettingsSnapshot, SwitchMode,
     discover_devices, select_device,
 };
@@ -98,6 +99,33 @@ This command does not open or change a lens. If no lens appears, tlc prints the 
 tlc checks that a backup is undamaged and was made for the same lens model. Restoring a backup or resetting the lens asks for confirmation before making changes. Pass --yes to skip that prompt."
     )]
     Settings(SettingsCommand),
+    /// Check for or install lens firmware from Tamron's update service.
+    #[command(
+        subcommand,
+        long_about = "Check the firmware advertised for the connected lens or install it over USB. Updating firmware can make the lens unusable if power or USB is interrupted. Save your settings first and keep the lens connected until tlc finishes."
+    )]
+    Firmware(FirmwareCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum FirmwareCommand {
+    /// Check the firmware advertised for this lens without changing it.
+    Check,
+    /// Download, validate, and install the firmware advertised for this lens.
+    Update {
+        /// Install without asking for confirmation.
+        #[arg(
+            long,
+            long_help = "Proceed without the interactive confirmation after reviewing the connected lens and available firmware. This does not bypass validation or device identity checks."
+        )]
+        yes: bool,
+        /// Reinstall firmware when the advertised display version matches the installed version.
+        #[arg(
+            long,
+            long_help = "Permit reinstalling the same displayed firmware version. This does not select arbitrary, older, or local firmware."
+        )]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -511,14 +539,29 @@ fn run_cli(cli: Cli) -> Result<()> {
         print_device_rows(&devices, true);
     }
     let device = select_device(&devices, cli.device.as_deref())?;
+    if matches!(
+        cli.command,
+        Command::Firmware(FirmwareCommand::Update { .. })
+    ) && device.serial_number.is_none()
+    {
+        return Err(Error::FirmwareSerialRequired);
+    }
     log::debug!(target: "tlc", "using lens at {}", device.port_name);
-    let mut lens = Lens::connect(&device)?;
-    let action_result = execute(&mut lens, cli.command);
-    match action_result {
-        Ok(()) => lens.disconnect(),
-        Err(error) => {
-            let _ = lens.disconnect();
-            Err(error)
+    let lens = Lens::connect(&device)?;
+    match cli.command {
+        Command::Firmware(FirmwareCommand::Update { yes, force }) => {
+            execute_firmware_update(lens, yes, force)
+        }
+        command => {
+            let mut lens = lens;
+            let action_result = execute(&mut lens, command);
+            match action_result {
+                Ok(()) => lens.disconnect(),
+                Err(error) => {
+                    let _ = lens.disconnect();
+                    Err(error)
+                }
+            }
         }
     }
 }
@@ -532,6 +575,103 @@ fn execute(lens: &mut Lens, command: Command) -> Result<()> {
         Command::Switch(command) => execute_switch(lens, command),
         Command::FocusCalibration(command) => execute_focus_calibration(lens, command),
         Command::Settings(command) => execute_settings(lens, command),
+        Command::Firmware(FirmwareCommand::Check) => execute_firmware_check(lens),
+        Command::Firmware(FirmwareCommand::Update { .. }) => unreachable!(),
+    }
+}
+
+fn execute_firmware_check(lens: &Lens) -> Result<()> {
+    let metadata = lens.check_firmware()?;
+    print_firmware_metadata(&metadata);
+    println!(
+        "Status: {}",
+        if !metadata.is_available() {
+            "unavailable for this model and mount"
+        } else if metadata.update_indicated() {
+            "update available"
+        } else {
+            "up to date"
+        }
+    );
+    Ok(())
+}
+
+fn execute_firmware_update(lens: Lens, yes: bool, force: bool) -> Result<()> {
+    let control = FirmwareUpdateControl::new();
+    let signal_control = control.clone();
+    let ignored_notice = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let signal_notice = ignored_notice.clone();
+    ctrlc::set_handler(move || {
+        if signal_control.transfer_active() {
+            if !signal_notice.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                eprintln!(
+                    "tlc: firmware transfer is active; Ctrl-C is ignored until cleanup finishes"
+                );
+            }
+        } else {
+            signal_control.cancel();
+        }
+    })
+    .map_err(|error| Error::InvalidValue(format!("could not install Ctrl-C handler: {error}")))?;
+
+    let outcome = lens.update_firmware(
+        force,
+        &control,
+        |metadata| {
+            print_firmware_metadata(metadata);
+            if yes {
+                Ok(true)
+            } else {
+                eprintln!("Back up lens settings before continuing.");
+                prompt_for_confirmation(
+                    "Install this firmware? Interrupting USB or power can make the lens unusable.",
+                )
+            }
+        },
+        print_firmware_progress,
+    )?;
+    match outcome {
+        FirmwareUpdateOutcome::Installed => {
+            println!("firmware transfer completed");
+            println!("Reconnect the lens, then run `tlc info` to verify its firmware.");
+        }
+        FirmwareUpdateOutcome::UpToDate => println!("firmware is already up to date"),
+        FirmwareUpdateOutcome::Declined => {
+            eprintln!("tlc: cancelled; firmware was not downloaded or changed")
+        }
+    }
+    Ok(())
+}
+
+fn print_firmware_metadata(metadata: &FirmwareMetadata) {
+    println!("Model: {}", metadata.model);
+    println!("Mount: {}", metadata.mount);
+    println!("Installed: {}", metadata.installed_version);
+    println!("Available: {}", metadata.available_version);
+}
+
+fn print_firmware_progress(progress: FirmwareProgress) {
+    match progress {
+        FirmwareProgress::Downloading => eprintln!("tlc: downloading firmware"),
+        FirmwareProgress::Validating => eprintln!("tlc: validating firmware"),
+        FirmwareProgress::ImageStarted {
+            image,
+            image_count,
+            device,
+            area,
+        } => eprintln!(
+            "tlc: transferring image {image}/{image_count} (device {device}, area {area})"
+        ),
+        FirmwareProgress::BlockAcknowledged {
+            acknowledged_bytes,
+            total_bytes,
+            percent,
+        } => eprintln!(
+            "tlc: firmware progress {percent}% ({acknowledged_bytes}/{total_bytes} bytes acknowledged)"
+        ),
+        FirmwareProgress::ImageCompleted { image, image_count } => {
+            eprintln!("tlc: image {image}/{image_count} completed")
+        }
     }
 }
 
@@ -1004,6 +1144,8 @@ mod tests {
         ])
         .unwrap();
         Cli::try_parse_from(["tlc", "settings", "load", "backup.tlc", "--yes"]).unwrap();
+        Cli::try_parse_from(["tlc", "firmware", "check"]).unwrap();
+        Cli::try_parse_from(["tlc", "firmware", "update", "--yes", "--force"]).unwrap();
         Cli::try_parse_from(["tlc", "focus-calibration", "set", "-2"]).unwrap();
         assert!(Cli::try_parse_from(["tlc", "adjustment", "get"]).is_err());
     }
@@ -1029,6 +1171,7 @@ mod tests {
         Cli::try_parse_from(["tlc", "settings", "reset", "--yes"]).unwrap();
         Cli::try_parse_from(["tlc", "settings", "load", "backup.tlc"]).unwrap();
         assert!(Cli::try_parse_from(["tlc", "settings", "save", "backup.tlc", "--force"]).is_err());
+        assert!(Cli::try_parse_from(["tlc", "firmware", "check", "--yes"]).is_err());
     }
 
     #[test]

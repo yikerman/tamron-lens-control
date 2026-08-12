@@ -86,4 +86,22 @@ pub enum Error {
     /// Snapshot belongs to a different lens model.
     #[error("snapshot model does not match the connected lens")]
     SnapshotModelMismatch,
+    /// The selected lens does not expose a USB serial needed for safe re-enumeration.
+    #[error("firmware update requires the lens to expose a USB serial number")]
+    FirmwareSerialRequired,
+    /// Firmware metadata could not be retrieved or parsed.
+    #[error("firmware metadata failed: {0}")]
+    FirmwareMetadata(String),
+    /// The firmware payload could not be downloaded.
+    #[error("firmware download failed: {0}")]
+    FirmwareDownload(String),
+    /// The downloaded firmware container was invalid or corrupt.
+    #[error("invalid firmware data: {0}")]
+    FirmwareData(String),
+    /// The lens firmware transfer failed.
+    #[error("firmware transfer failed: {0}")]
+    FirmwareTransfer(String),
+    /// The update was cancelled before firmware transfer began.
+    #[error("firmware update cancelled before transfer")]
+    FirmwareCancelled,
 }

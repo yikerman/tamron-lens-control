@@ -10,8 +10,9 @@ This Rust 2024 project builds the `tlc` binary and reusable
 - `src/device.rs`: Linux USB serial discovery and device selection.
 - `src/protocol.rs`: private framing, CRC, timing, and memory operations.
 - `src/lens.rs`: typed lens settings, validation, and writes.
+- `src/firmware.rs`: firmware metadata, container validation, and update control.
 - `src/snapshot.rs`: versioned `.tlc` backup files.
-- `PROTOCOL.md`: normative wire and memory specification.
+- `PROTOCOL.md` `PROTOCOL_UPDATEFW.md`: normative wire and memory specification.
 - `TODO.md`: functionality and verification status.
 
 Tests live beside modules in `#[cfg(test)]` blocks. There are no assets.
@@ -46,12 +47,14 @@ Add focused tests for parser, validation, and frame changes. Use scripted fake
 transports for writes, timeouts, ordering, and failures. Do not change a real
 lens merely to run routine tests. Hardware write checks must be explicitly
 authorized, reversible, read back, and restored immediately. Update `TODO.md`
-only after the stated verification has passed.
+only after the stated verification has passed. Firmware transfers require
+separate explicit authorization because they are not reversible; never initiate
+one as part of an automated test or routine verification command.
 
 ## Commit & Pull Request Guidelines
 
 No commit convention exists yet. Use short imperative subjects, optionally
-scoped, such as `cli: clarify focus limiter help`. Keep unrelated changes
+scoped, such as `cli clarify focus limiter help`. Keep unrelated changes
 separate.
 
 Pull requests should explain user-visible behavior, protocol assumptions, and
@@ -60,6 +63,9 @@ Call out real-hardware setting changes and restoration results.
 
 ## Safety & Scope
 
-Treat `PROTOCOL.md` as the source of truth. Preserve the stateless lifecycle,
-capability checks, no-retry behavior, and explicit disconnect. Firmware update
-support remains deferred until its image format and safety rules are specified.
+Treat `PROTOCOL.md` `PROTOCOL_UPDATEFW.md` as the source of truth. Preserve the
+stateless lifecycle, capability checks, no-retry behavior, and explicit
+disconnect. The ordinary network update path is implemented and hardware-tested
+for an A068 `(device 0, area 0)` image. Its staged re-enumeration path remains
+automated-only. Recovery and local raw-image firmware paths remain deferred until
+their CLI safety rules and hardware verification procedure are specified.

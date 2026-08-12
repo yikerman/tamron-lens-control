@@ -8,12 +8,16 @@ compile_error!("tamron-lens-control supports Linux only");
 
 mod device;
 mod error;
+mod firmware;
 mod lens;
 mod protocol;
 mod snapshot;
 
 pub use device::{DeviceInfo, discover_devices, select_device};
 pub use error::{Error, Result};
+pub use firmware::{
+    FirmwareMetadata, FirmwareProgress, FirmwareUpdateControl, FirmwareUpdateOutcome,
+};
 pub use lens::{
     AfLimit, ButtonFunction, ButtonSettings, ButtonSlot, Capabilities, ConnectionState,
     FocusRingDirection, FocusRingFunction, FocusRingResponse, Lens, LensClass, LensInfo,

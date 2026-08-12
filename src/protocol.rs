@@ -16,10 +16,12 @@ const OP_READ_MEMORY: u8 = 0xf4;
 const OP_WRITE_MEMORY: u8 = 0xf5;
 const OP_CONNECT: u8 = 0xf8;
 const OP_DISCONNECT: u8 = 0xf9;
+const OP_BEGIN_FIRMWARE: u8 = 0xfd;
 const OP_COMMUNICATION_ERROR: u8 = 0xff;
 
 pub(crate) trait Port: Read + Write + Send {
     fn set_read_timeout(&mut self, timeout: Duration) -> io::Result<()>;
+    fn set_baud_rate(&mut self, baud_rate: u32) -> io::Result<()>;
 }
 
 struct SerialPortIo(Box<dyn serialport::SerialPort>);
@@ -44,6 +46,10 @@ impl Port for SerialPortIo {
     fn set_read_timeout(&mut self, timeout: Duration) -> io::Result<()> {
         self.0.set_timeout(timeout).map_err(io::Error::other)
     }
+
+    fn set_baud_rate(&mut self, baud_rate: u32) -> io::Result<()> {
+        self.0.set_baud_rate(baud_rate).map_err(io::Error::other)
+    }
 }
 
 pub(crate) trait LensIo: Send {
@@ -54,6 +60,31 @@ pub(crate) trait LensIo: Send {
     fn restore_settings(&mut self, settings: &[u8; 512]) -> Result<()>;
     fn factory_reset(&mut self) -> Result<()>;
     fn disconnect(&mut self) -> Result<()>;
+    fn stage_firmware(&mut self) -> Result<()> {
+        Err(Error::FirmwareTransfer(
+            "firmware transfer is unavailable".into(),
+        ))
+    }
+    fn start_firmware(&mut self, _device: u8, _area: u8) -> Result<()> {
+        Err(Error::FirmwareTransfer(
+            "firmware transfer is unavailable".into(),
+        ))
+    }
+    fn send_firmware_block(&mut self, _data: &[u8; 1024], _initial: bool) -> Result<()> {
+        Err(Error::FirmwareTransfer(
+            "firmware transfer is unavailable".into(),
+        ))
+    }
+    fn finish_firmware(&mut self) -> Result<()> {
+        Err(Error::FirmwareTransfer(
+            "firmware transfer is unavailable".into(),
+        ))
+    }
+    fn restore_command_mode(&mut self) -> Result<()> {
+        Err(Error::FirmwareTransfer(
+            "firmware transfer is unavailable".into(),
+        ))
+    }
 }
 
 pub(crate) fn open(device: &DeviceInfo) -> Result<Box<dyn LensIo>> {
@@ -72,6 +103,36 @@ pub(crate) fn open(device: &DeviceInfo) -> Result<Box<dyn LensIo>> {
     Ok(Box::new(CommandSession::new(SerialPortIo(port))))
 }
 
+pub(crate) fn closed() -> Box<dyn LensIo> {
+    Box::new(ClosedSession)
+}
+
+struct ClosedSession;
+
+impl LensIo for ClosedSession {
+    fn connect(&mut self) -> Result<u8> {
+        Err(Error::FirmwareTransfer("serial session is closed".into()))
+    }
+    fn read_block(&mut self, _region: u8, _block: u8) -> Result<[u8; 256]> {
+        Err(Error::FirmwareTransfer("serial session is closed".into()))
+    }
+    fn write_byte(&mut self, _block: u8, _offset: u8, _value: u8) -> Result<()> {
+        Err(Error::FirmwareTransfer("serial session is closed".into()))
+    }
+    fn write_word(&mut self, _block: u8, _offset: u8, _value: u16) -> Result<()> {
+        Err(Error::FirmwareTransfer("serial session is closed".into()))
+    }
+    fn restore_settings(&mut self, _settings: &[u8; 512]) -> Result<()> {
+        Err(Error::FirmwareTransfer("serial session is closed".into()))
+    }
+    fn factory_reset(&mut self) -> Result<()> {
+        Err(Error::FirmwareTransfer("serial session is closed".into()))
+    }
+    fn disconnect(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 struct Response {
     data: Vec<u8>,
 }
@@ -79,11 +140,16 @@ struct Response {
 pub(crate) struct CommandSession<P> {
     port: P,
     sequence: u8,
+    firmware_block: u8,
 }
 
 impl<P: Port> CommandSession<P> {
     fn new(port: P) -> Self {
-        Self { port, sequence: 0 }
+        Self {
+            port,
+            sequence: 0,
+            firmware_block: 0,
+        }
     }
 
     fn next_sequence(&mut self) -> u8 {
@@ -203,6 +269,28 @@ impl<P: Port> CommandSession<P> {
             })
         }
     }
+
+    fn send_without_response(&mut self, op: u8, data: &[u8]) -> Result<()> {
+        let sequence = self.next_sequence();
+        let frame = encode_frame(sequence, op, data)?;
+        log::debug!(target: "tlc", "command {sequence:02X}: {}", describe_command(op, data));
+        log::trace!(target: "tlc", "TX {}", HexBytes(&frame));
+        self.port.write_all(&frame)?;
+        self.port.flush()?;
+        Ok(())
+    }
+
+    fn wait_for_raw(&mut self, expected: u8, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut byte = [0_u8; 1];
+        loop {
+            read_exact_until(&mut self.port, &mut byte, deadline)?;
+            log::trace!(target: "tlc", "RX {:02X}", byte[0]);
+            if byte[0] == expected {
+                return Ok(());
+            }
+        }
+    }
 }
 
 impl<P: Port> LensIo for CommandSession<P> {
@@ -259,6 +347,54 @@ impl<P: Port> LensIo for CommandSession<P> {
     fn disconnect(&mut self) -> Result<()> {
         self.request(OP_DISCONNECT, &[]).map(|_| ())
     }
+
+    fn stage_firmware(&mut self) -> Result<()> {
+        self.send_without_response(OP_BEGIN_FIRMWARE, &[0, 2])
+    }
+
+    fn start_firmware(&mut self, device: u8, area: u8) -> Result<()> {
+        self.send_without_response(OP_BEGIN_FIRMWARE, &[device, area])?;
+        std::thread::sleep(Duration::from_millis(10));
+        self.port.set_baud_rate(3_000_000)?;
+        self.wait_for_raw(0x43, Duration::from_secs(10))
+    }
+
+    fn send_firmware_block(&mut self, data: &[u8; 1024], initial: bool) -> Result<()> {
+        self.firmware_block = self.firmware_block.wrapping_add(1) % 255;
+        let block = self.firmware_block;
+        let crc = COMMAND_CRC.checksum(data);
+        let mut frame = Vec::with_capacity(1029);
+        frame.extend_from_slice(&[0x02, block, !block]);
+        frame.extend_from_slice(data);
+        frame.extend_from_slice(&crc.to_be_bytes());
+        log::trace!(target: "tlc", "TX {}", HexBytes(&frame));
+        self.port.write_all(&frame)?;
+        self.port.flush()?;
+        self.wait_for_raw(
+            0x06,
+            if initial {
+                Duration::from_secs(10)
+            } else {
+                Duration::from_millis(500)
+            },
+        )
+    }
+
+    fn finish_firmware(&mut self) -> Result<()> {
+        for expected in [0x15, 0x06] {
+            log::trace!(target: "tlc", "TX 04");
+            self.port.write_all(&[0x04])?;
+            self.port.flush()?;
+            self.wait_for_raw(expected, Duration::from_millis(500))?;
+        }
+        Ok(())
+    }
+
+    fn restore_command_mode(&mut self) -> Result<()> {
+        self.port.set_baud_rate(19_200)?;
+        self.port.set_read_timeout(COMMAND_TIMEOUT)?;
+        Ok(())
+    }
 }
 
 struct DecodedFrame {
@@ -286,6 +422,9 @@ fn describe_command(op: u8, data: &[u8]) -> String {
     match (op, data) {
         (OP_CONNECT, _) => "connect".into(),
         (OP_DISCONNECT, _) => "disconnect".into(),
+        (OP_BEGIN_FIRMWARE, [device, area]) => {
+            format!("begin firmware transfer for device {device}, area {area}")
+        }
         (OP_READ_MEMORY, [0, 0, block, offset, size, ..]) => {
             describe_read("descriptor", *block, *offset, *size)
         }
@@ -359,6 +498,7 @@ mod tests {
     struct FakePort {
         reads: VecDeque<u8>,
         writes: Vec<u8>,
+        baud_rates: Vec<u32>,
     }
 
     impl Read for FakePort {
@@ -389,6 +529,19 @@ mod tests {
         fn set_read_timeout(&mut self, _timeout: Duration) -> io::Result<()> {
             Ok(())
         }
+
+        fn set_baud_rate(&mut self, _baud_rate: u32) -> io::Result<()> {
+            self.baud_rates.push(_baud_rate);
+            Ok(())
+        }
+    }
+
+    fn fake_port(reads: impl Into<VecDeque<u8>>) -> FakePort {
+        FakePort {
+            reads: reads.into(),
+            writes: Vec::new(),
+            baud_rates: Vec::new(),
+        }
     }
 
     fn response(sequence: u8, op: u8, data: &[u8]) -> Vec<u8> {
@@ -403,10 +556,7 @@ mod tests {
     #[test]
     fn request_encodes_and_accepts_partial_reads() {
         let reply = response(1, OP_CONNECT, &[1]);
-        let port = FakePort {
-            reads: reply.into(),
-            writes: Vec::new(),
-        };
+        let port = fake_port(reply);
         let mut session = CommandSession::new(port);
         assert_eq!(session.connect().unwrap(), 1);
         assert_eq!(
@@ -418,10 +568,7 @@ mod tests {
     #[test]
     fn sequence_mismatch_is_discarded() {
         let replies = [response(2, OP_CONNECT, &[1]), response(1, OP_CONNECT, &[2])].concat();
-        let port = FakePort {
-            reads: replies.into(),
-            writes: Vec::new(),
-        };
+        let port = fake_port(replies);
         let mut session = CommandSession::new(port);
         assert_eq!(session.connect().unwrap(), 2);
     }
@@ -433,20 +580,14 @@ mod tests {
         let crc_index = reply.len() - 3;
         let crc = COMMAND_CRC.checksum(&reply[..crc_index]);
         reply[crc_index..crc_index + 2].copy_from_slice(&crc.to_le_bytes());
-        let port = FakePort {
-            reads: reply.into(),
-            writes: Vec::new(),
-        };
+        let port = fake_port(reply);
         let mut session = CommandSession::new(port);
         assert!(matches!(session.connect(), Err(Error::CommunicationError)));
     }
 
     #[test]
     fn sequence_wrap_skips_zero() {
-        let port = FakePort {
-            reads: VecDeque::new(),
-            writes: Vec::new(),
-        };
+        let port = fake_port(VecDeque::new());
         let mut session = CommandSession::new(port);
         session.sequence = 0xfe;
         assert_eq!(session.next_sequence(), 0xff);
@@ -460,10 +601,7 @@ mod tests {
             response(2, OP_WRITE_MEMORY, &[0]),
         ]
         .concat();
-        let port = FakePort {
-            reads: replies.into(),
-            writes: Vec::new(),
-        };
+        let port = fake_port(replies);
         let mut session = CommandSession::new(port);
         let settings = [0x5a; 512];
         session.restore_settings(&settings).unwrap();
@@ -482,10 +620,7 @@ mod tests {
 
     #[test]
     fn timeout_does_not_retry_request() {
-        let port = FakePort {
-            reads: VecDeque::new(),
-            writes: Vec::new(),
-        };
+        let port = fake_port(VecDeque::new());
         let mut session = CommandSession::new(port);
         assert!(matches!(session.connect(), Err(Error::Timeout)));
         assert_eq!(
@@ -497,15 +632,55 @@ mod tests {
     #[test]
     fn rejected_result_is_preserved() {
         let reply = response(1, OP_WRITE_MEMORY, &[0x83]);
-        let port = FakePort {
-            reads: reply.into(),
-            writes: Vec::new(),
-        };
+        let port = fake_port(reply);
         let mut session = CommandSession::new(port);
         assert!(matches!(
             session.write_byte(0, 1, 2),
             Err(Error::OperationRejected { code: 0x83, .. })
         ));
+    }
+
+    #[test]
+    fn firmware_block_uses_fixed_layout_and_big_endian_crc() {
+        let port = fake_port([0x06]);
+        let mut session = CommandSession::new(port);
+        let data = [0x5a; 1024];
+        session.send_firmware_block(&data, false).unwrap();
+        let frame = &session.port.writes;
+        assert_eq!(frame.len(), 1029);
+        assert_eq!(&frame[..3], &[0x02, 0x01, 0xfe]);
+        assert_eq!(&frame[3..1027], &data);
+        assert_eq!(&frame[1027..], &COMMAND_CRC.checksum(&data).to_be_bytes());
+    }
+
+    #[test]
+    fn firmware_block_counter_wraps_modulo_255() {
+        let port = fake_port([0x06]);
+        let mut session = CommandSession::new(port);
+        session.firmware_block = 0xfe;
+        session.send_firmware_block(&[0; 1024], false).unwrap();
+        assert_eq!(&session.port.writes[..3], &[0x02, 0x00, 0xff]);
+    }
+
+    #[test]
+    fn firmware_completion_sends_two_eot_bytes() {
+        let port = fake_port([0x15, 0x06]);
+        let mut session = CommandSession::new(port);
+        session.finish_firmware().unwrap();
+        assert_eq!(session.port.writes, [0x04, 0x04]);
+    }
+
+    #[test]
+    fn firmware_start_and_cleanup_change_baud_rates() {
+        let port = fake_port([0x43]);
+        let mut session = CommandSession::new(port);
+        session.start_firmware(1, 0).unwrap();
+        session.restore_command_mode().unwrap();
+        assert_eq!(session.port.baud_rates, [3_000_000, 19_200]);
+        assert_eq!(
+            session.port.writes,
+            encode_frame(1, OP_BEGIN_FIRMWARE, &[1, 0]).unwrap()
+        );
     }
 
     #[test]

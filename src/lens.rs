@@ -1,6 +1,9 @@
 use std::fmt;
 
-use crate::{DeviceInfo, Error, Result, SettingsSnapshot, protocol};
+use crate::{
+    DeviceInfo, Error, FirmwareMetadata, FirmwareProgress, FirmwareUpdateControl,
+    FirmwareUpdateOutcome, Result, SettingsSnapshot, discover_devices, firmware, protocol,
+};
 
 const DESCRIPTOR_REGION: u8 = 0;
 const SETTINGS_REGION: u8 = 1;
@@ -136,6 +139,7 @@ pub struct LensInfo {
     pub firmware_major: u8,
     /// Firmware minor byte.
     pub firmware_minor: u8,
+    pub(crate) firmware_flags: u8,
     /// Lens mount.
     pub mount: Mount,
     /// Lens mechanical classification.
@@ -202,6 +206,7 @@ impl LensInfo {
             model_id,
             firmware_major: bytes[25],
             firmware_minor: bytes[24],
+            firmware_flags: bytes[1],
             mount: match bytes[5] {
                 1 => Mount::CanonRf,
                 2 => Mount::NikonZ,
@@ -569,6 +574,7 @@ pub enum SettingChange {
 /// A connected lens with cached descriptor and semantic settings state.
 pub struct Lens {
     io: Box<dyn protocol::LensIo>,
+    device: DeviceInfo,
     info: LensInfo,
     settings: LensSettings,
 }
@@ -586,10 +592,10 @@ impl fmt::Debug for Lens {
 impl Lens {
     /// Open a serial device, connect, and load descriptor plus settings memory.
     pub fn connect(device: &DeviceInfo) -> Result<Self> {
-        Self::initialize(protocol::open(device)?)
+        Self::initialize(protocol::open(device)?, device.clone())
     }
 
-    fn initialize(mut io: Box<dyn protocol::LensIo>) -> Result<Self> {
+    fn initialize(mut io: Box<dyn protocol::LensIo>, device: DeviceInfo) -> Result<Self> {
         let connection_state = match io.connect()? {
             1 => ConnectionState::Standalone,
             2 => ConnectionState::CameraAttached,
@@ -609,7 +615,12 @@ impl Lens {
                 return Err(error);
             }
         };
-        Ok(Self { io, info, settings })
+        Ok(Self {
+            io,
+            device,
+            info,
+            settings,
+        })
     }
 
     /// Current descriptor-derived information.
@@ -620,6 +631,178 @@ impl Lens {
     /// Current cached settings.
     pub fn settings(&self) -> &LensSettings {
         &self.settings
+    }
+
+    /// Look up the firmware advertised for this connected lens.
+    pub fn check_firmware(&self) -> Result<FirmwareMetadata> {
+        firmware::fetch_metadata(&self.info)
+    }
+
+    /// Look up, confirm, download, validate, and install advertised firmware.
+    ///
+    /// This consumes the lens so the updater exclusively owns serial cleanup.
+    pub fn update_firmware<C, P>(
+        mut self,
+        force_reinstall: bool,
+        control: &FirmwareUpdateControl,
+        mut confirm: C,
+        mut progress: P,
+    ) -> Result<FirmwareUpdateOutcome>
+    where
+        C: FnMut(&FirmwareMetadata) -> Result<bool>,
+        P: FnMut(FirmwareProgress),
+    {
+        if self.device.serial_number.is_none() {
+            return self.disconnect_before_transfer(Error::FirmwareSerialRequired);
+        }
+        if self.info.connection_state == ConnectionState::CameraAttached {
+            return self.disconnect_before_transfer(Error::FirmwareTransfer(
+                "disconnect the lens from the camera before updating".into(),
+            ));
+        }
+        if let Err(error) = control.check_cancelled() {
+            return self.disconnect_before_transfer(error);
+        }
+        let metadata = match firmware::fetch_metadata(&self.info) {
+            Ok(metadata) => metadata,
+            Err(error) => return self.disconnect_before_transfer(error),
+        };
+        if !metadata.is_available() {
+            return self.disconnect_before_transfer(Error::FirmwareData(
+                "no firmware is available for this model and mount".into(),
+            ));
+        }
+        if !metadata.update_indicated() && !force_reinstall {
+            self.io.disconnect()?;
+            return Ok(FirmwareUpdateOutcome::UpToDate);
+        }
+        let confirmed = match confirm(&metadata) {
+            Ok(confirmed) => confirmed,
+            Err(error) => return self.disconnect_before_transfer(error),
+        };
+        if !confirmed {
+            self.io.disconnect()?;
+            return Ok(FirmwareUpdateOutcome::Declined);
+        }
+        if let Err(error) = control.check_cancelled() {
+            return self.disconnect_before_transfer(error);
+        }
+        let images = match firmware::download_and_decode(&metadata, control, &mut progress) {
+            Ok(images) => firmware::order_images(images),
+            Err(error) => return self.disconnect_before_transfer(error),
+        };
+        if let Err(error) = control.check_cancelled() {
+            return self.disconnect_before_transfer(error);
+        }
+        if let Err(error) = control.protect_transfer() {
+            return self.disconnect_before_transfer(error);
+        }
+        let result = self.transfer_images(&images, &mut progress);
+        control.finish_transfer();
+        result.map(|()| FirmwareUpdateOutcome::Installed)
+    }
+
+    fn disconnect_before_transfer<T>(&mut self, error: Error) -> Result<T> {
+        match self.io.disconnect() {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(Error::FirmwareTransfer(format!(
+                "{error}; disconnect cleanup also failed: {cleanup}"
+            ))),
+        }
+    }
+
+    fn transfer_images(
+        &mut self,
+        images: &[firmware::FirmwareImage],
+        progress: &mut impl FnMut(FirmwareProgress),
+    ) -> Result<()> {
+        let total_bytes = firmware::padded_transfer_size(images);
+        let mut acknowledged_bytes = 0_u64;
+        for (index, image) in images.iter().enumerate() {
+            let staged = image.device == 0 && self.info.firmware_flags & 0x02 != 0;
+            let area = if staged { 2 } else { image.area };
+            progress(FirmwareProgress::ImageStarted {
+                image: index + 1,
+                image_count: images.len(),
+                device: image.device,
+                area,
+            });
+            let start_result = if staged {
+                self.start_staged_firmware()
+            } else {
+                self.io.start_firmware(image.device, image.area)
+            };
+            if let Err(error) = start_result {
+                let _ = self.io.restore_command_mode();
+                return Err(transfer_error(error));
+            }
+
+            let image_result = (|| {
+                let zero = [0_u8; 1024];
+                self.io.send_firmware_block(&zero, true)?;
+                report_block(progress, &mut acknowledged_bytes, total_bytes);
+                for chunk in image.payload.chunks(1024) {
+                    let mut block = [0_u8; 1024];
+                    block[..chunk.len()].copy_from_slice(chunk);
+                    self.io.send_firmware_block(&block, false)?;
+                    report_block(progress, &mut acknowledged_bytes, total_bytes);
+                }
+                self.io.finish_firmware()
+            })();
+            let cleanup_result = self.io.restore_command_mode();
+            if let Err(error) = image_result {
+                return match cleanup_result {
+                    Ok(()) => Err(transfer_error(error)),
+                    Err(cleanup) => Err(Error::FirmwareTransfer(format!(
+                        "{error}; command-mode cleanup also failed: {cleanup}"
+                    ))),
+                };
+            }
+            cleanup_result.map_err(transfer_error)?;
+            progress(FirmwareProgress::ImageCompleted {
+                image: index + 1,
+                image_count: images.len(),
+            });
+        }
+        Ok(())
+    }
+
+    fn start_staged_firmware(&mut self) -> Result<()> {
+        let serial = self
+            .device
+            .serial_number
+            .as_deref()
+            .ok_or(Error::FirmwareSerialRequired)?
+            .to_owned();
+        self.io.stage_firmware()?;
+        drop(std::mem::replace(&mut self.io, protocol::closed()));
+        let mut reopened = None;
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let devices = discover_devices()?;
+            if let Some(device) = devices
+                .into_iter()
+                .find(|device| device.serial_number.as_deref() == Some(serial.as_str()))
+            {
+                match protocol::open(&device) {
+                    Ok(io) => {
+                        reopened = Some((device, io));
+                        break;
+                    }
+                    Err(error) => log::debug!(target: "tlc", "staged reopen failed: {error}"),
+                }
+            }
+        }
+        let (device, io) = reopened.ok_or_else(|| {
+            Error::FirmwareTransfer(format!(
+                "lens with USB serial {serial:?} did not reappear after staged start"
+            ))
+        })?;
+        self.device = device;
+        self.io = io;
+        self.io.connect()?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        self.io.start_firmware(0, 2)
     }
 
     /// Whether a logical button slot is present and configurable.
@@ -972,6 +1155,27 @@ fn load_state(
     Ok((info, settings))
 }
 
+fn report_block(
+    progress: &mut impl FnMut(FirmwareProgress),
+    acknowledged_bytes: &mut u64,
+    total_bytes: u64,
+) {
+    *acknowledged_bytes += 1024;
+    let percent = ((*acknowledged_bytes * 100) / total_bytes).min(100) as u8;
+    progress(FirmwareProgress::BlockAcknowledged {
+        acknowledged_bytes: *acknowledged_bytes,
+        total_bytes,
+        percent,
+    });
+}
+
+fn transfer_error(error: Error) -> Error {
+    match error {
+        Error::FirmwareTransfer(_) => error,
+        error => Error::FirmwareTransfer(error.to_string()),
+    }
+}
+
 fn pack_limit(value: AfLimit) -> u8 {
     (value.far_index << 4) | value.near_index
 }
@@ -993,7 +1197,10 @@ fn validate_overlap(functions: &[ButtonFunction; 4]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
     enum Call {
         Connect(u8),
@@ -1006,6 +1213,72 @@ mod tests {
     }
 
     struct FakeIo(VecDeque<Call>);
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum FirmwareCall {
+        Start(u8, u8),
+        Block { initial: bool, prefix: Vec<u8> },
+        Finish,
+        RestoreMode,
+    }
+
+    struct FirmwareIo(Arc<Mutex<Vec<FirmwareCall>>>);
+
+    impl protocol::LensIo for FirmwareIo {
+        fn connect(&mut self) -> Result<u8> {
+            unreachable!()
+        }
+
+        fn read_block(&mut self, _region: u8, _block: u8) -> Result<[u8; 256]> {
+            unreachable!()
+        }
+
+        fn write_byte(&mut self, _block: u8, _offset: u8, _value: u8) -> Result<()> {
+            unreachable!()
+        }
+
+        fn write_word(&mut self, _block: u8, _offset: u8, _value: u16) -> Result<()> {
+            unreachable!()
+        }
+
+        fn restore_settings(&mut self, _settings: &[u8; 512]) -> Result<()> {
+            unreachable!()
+        }
+
+        fn factory_reset(&mut self) -> Result<()> {
+            unreachable!()
+        }
+
+        fn disconnect(&mut self) -> Result<()> {
+            unreachable!()
+        }
+
+        fn start_firmware(&mut self, device: u8, area: u8) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(FirmwareCall::Start(device, area));
+            Ok(())
+        }
+
+        fn send_firmware_block(&mut self, data: &[u8; 1024], initial: bool) -> Result<()> {
+            self.0.lock().unwrap().push(FirmwareCall::Block {
+                initial,
+                prefix: data[..4].to_vec(),
+            });
+            Ok(())
+        }
+
+        fn finish_firmware(&mut self) -> Result<()> {
+            self.0.lock().unwrap().push(FirmwareCall::Finish);
+            Ok(())
+        }
+
+        fn restore_command_mode(&mut self) -> Result<()> {
+            self.0.lock().unwrap().push(FirmwareCall::RestoreMode);
+            Ok(())
+        }
+    }
 
     impl protocol::LensIo for FakeIo {
         fn connect(&mut self) -> Result<u8> {
@@ -1083,6 +1356,15 @@ mod tests {
         value
     }
 
+    fn test_device() -> DeviceInfo {
+        DeviceInfo {
+            port_name: "/dev/ttyUSB-test".into(),
+            serial_number: Some("TEST-SERIAL".into()),
+            vendor_id: 0x2cd1,
+            product_id: 0x0002,
+        }
+    }
+
     fn initialized_with(extra: impl IntoIterator<Item = Call>) -> Lens {
         let mut calls = VecDeque::from([
             Call::Connect(1),
@@ -1091,7 +1373,7 @@ mod tests {
             Call::Read(Box::new([0; 256])),
         ]);
         calls.extend(extra);
-        Lens::initialize(Box::new(FakeIo(calls))).unwrap()
+        Lens::initialize(Box::new(FakeIo(calls)), test_device()).unwrap()
     }
 
     #[test]
@@ -1101,6 +1383,58 @@ mod tests {
         assert_eq!(lens.info.firmware_version(), "01.02");
         assert_eq!(lens.info.focus_angles, [90, 180, 270, 360]);
         assert_eq!(lens.info.limit_positions[3].label, "inf");
+    }
+
+    #[test]
+    fn firmware_transfer_sends_zero_and_padded_blocks_then_restores() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let info = LensInfo::parse(&descriptor(), ConnectionState::Standalone).unwrap();
+        let mut lens = Lens {
+            io: Box::new(FirmwareIo(calls.clone())),
+            device: test_device(),
+            settings: LensSettings::parse([0; 512], &info),
+            info,
+        };
+        let images = [firmware::FirmwareImage {
+            device: 1,
+            area: 0,
+            payload: vec![1, 2, 3],
+        }];
+        let mut progress = Vec::new();
+        lens.transfer_images(&images, &mut |event| progress.push(event))
+            .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                FirmwareCall::Start(1, 0),
+                FirmwareCall::Block {
+                    initial: true,
+                    prefix: vec![0, 0, 0, 0],
+                },
+                FirmwareCall::Block {
+                    initial: false,
+                    prefix: vec![1, 2, 3, 0],
+                },
+                FirmwareCall::Finish,
+                FirmwareCall::RestoreMode,
+            ]
+        );
+        assert!(matches!(
+            progress.last(),
+            Some(FirmwareProgress::ImageCompleted {
+                image: 1,
+                image_count: 1
+            })
+        ));
+        assert!(progress.iter().any(|event| matches!(
+            event,
+            FirmwareProgress::BlockAcknowledged {
+                acknowledged_bytes: 2048,
+                total_bytes: 2048,
+                percent: 100,
+            }
+        )));
     }
 
     #[test]
@@ -1188,7 +1522,7 @@ mod tests {
             Call::Read(Box::new([0; 256])),
             Call::Read(Box::new([0; 256])),
         ]);
-        let lens = Lens::initialize(Box::new(FakeIo(calls))).unwrap();
+        let lens = Lens::initialize(Box::new(FakeIo(calls)), test_device()).unwrap();
         assert_eq!(lens.info.connection_state, ConnectionState::CameraAttached);
     }
 
@@ -1196,7 +1530,7 @@ mod tests {
     fn recovery_state_is_reported_without_reading_memory() {
         let calls = VecDeque::from([Call::Connect(3), Call::Disconnect]);
         assert!(matches!(
-            Lens::initialize(Box::new(FakeIo(calls))),
+            Lens::initialize(Box::new(FakeIo(calls)), test_device()),
             Err(Error::RecoveryMode)
         ));
     }
@@ -1228,7 +1562,7 @@ mod tests {
             Call::Read(Box::new([0; 256])),
             Call::Read(Box::new([0; 256])),
         ]);
-        let lens = Lens::initialize(Box::new(FakeIo(calls))).unwrap();
+        let lens = Lens::initialize(Box::new(FakeIo(calls)), test_device()).unwrap();
         assert_eq!(lens.info.limit_positions.len(), 1);
     }
 

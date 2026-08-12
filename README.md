@@ -32,6 +32,7 @@ tlc --device /dev/ttyUSB0 info
 ## Use
 
 ```bash
+## EXAMPLES
 ## Each command connects to the lens, performs one action, and disconnects.
 ## Note that a lens may support only a subset of them.
 
@@ -47,10 +48,10 @@ tlc button get
 # Assign Focus Preset to the Focus Set Button
 tlc button set focus function focus-preset
 
-## some more.. see tlc --help
-
 # Fine-tune autofocus accuracy
 tlc focus-calibration set 2
+
+## some more.. see tlc --help
 ```
 
 Run `tlc --help` or add `--help` after any command for available settings, accepted values, and lens-specific requirements.
@@ -67,6 +68,31 @@ tlc settings load my-lens.tlc
 ```
 
 Backup files can be restored only to the same lens model.
+
+## Firmware
+
+Check the firmware advertised for the connected lens without changing it:
+
+```bash
+tlc firmware check
+```
+
+Before updating, save the current settings and connect the lens directly over
+USB. Firmware updates require the lens to expose a USB serial number so tlc can
+identify the same lens if it re-enumerates during the transfer.
+
+```bash
+tlc settings save before-firmware.tlc
+tlc firmware update
+```
+
+The update command shows the connected model, mount, installed firmware, and
+advertised firmware before asking for confirmation. Use `--yes` to skip the
+prompt or `--force` to reinstall an advertised version that matches the
+installed display version. Keep power and USB connected until the command
+finishes. Afterward, reconnect the lens and run `tlc info` to verify it.
+
+Recovery-mode and local raw-image firmware installation are not exposed.
 
 ## Linux Driver Setup
 
@@ -133,11 +159,12 @@ If it reports `dialout`, add your user to that group and log out completely:
 sudo usermod -aG dialout "$USER"
 ```
 
-Note that group membership grants access to every device owned by `dialout`, not only the lens.
+Note that group membership grants access to every device owned by `dialout`, not only the lens. The question lies more in why are you configuring lens through a headless system.
 
 ## Safety and Scope
 
 - Keep the lens connected until a command finishes.
 - Review a setting with its `get` command before changing it.
 - Use `settings save` before loading another backup or performing a reset.
-- Lens firmware updates and online firmware checks are not supported yet (see TODO.md).
+- Back up settings before firmware updates and do not interrupt power or USB.
+- Recovery-mode and local raw-image firmware installation remain unsupported.

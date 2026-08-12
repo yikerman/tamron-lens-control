@@ -15,7 +15,7 @@ resulting focus or camera behavior was measured optically.
 | Start | Remember/suppress welcome screen | Deferred | N/A | Stateless CLI keeps no preferences. |
 | Connection | Standalone connect and initial data load | Done | Automated + hardware | Descriptor plus settings blocks 0 and 1. |
 | Connection | Camera-attached connect and attempted writes | Done | Automated | Result `0x83` is surfaced contextually. |
-| Connection | Recovery-mode firmware prompt | Deferred | N/A | Firmware transfer is deferred from v1. |
+| Connection | Recovery-mode firmware prompt | Deferred | N/A | Reserve `tlc firmware recovery-update`; normal connected updates do not enter recovery flow. |
 | Connection | Explicit remove/disconnect | Done | Automated + hardware | Every connected command sends `0xF9`, then closes. |
 | Home | Product, model, mount, class, and firmware | Done | Hardware | `info` displays firmware as `MAJOR.MINOR`. |
 | Home | Current settings summary | Done | Hardware | `info` includes every advertised setting. |
@@ -44,8 +44,9 @@ resulting focus or camera behavior was measured optically.
 | Button | Shared-byte conflict protection | Done | Automated | Conflicting speed/move-count interpretations are rejected. |
 | Focus calibration | Focus-point correction | Done | Automated | Signed value bounded by descriptor half-range. |
 | Firmware | Installed firmware version | Done | Hardware | Network-free local descriptor value. |
-| Firmware | Latest-version network check and release notes | Deferred | N/A | Endpoints and download metadata are unspecified. |
-| Firmware | Local update and safe-mode recovery | Deferred | N/A | Firmware container metadata/authenticity are unspecified. |
+| Firmware | Latest-version network check | Done | Automated + hardware | A068 reported installed `01`, available `03` before updating, then installed and available `03` afterward; both checks disconnected normally. |
+| Firmware | Normal network update | Done | Automated + hardware (ordinary path) | A068 updated from `01.00` to `03.00` using the ordinary `(device 0, area 0)` path. Exact-serial staged rediscovery is implemented but not hardware-tested. |
+| Firmware | Local update and safe-mode recovery | Deferred | N/A | Future `firmware recovery-update`; raw maintenance images need independent model, target, size, and hash controls. |
 | Online | Function list, browser links, privacy, download site | Deferred | N/A | GUI/network navigation is outside the CLI v1 scope. |
 | Utility | CLI software version | Done | Help reviewed | `tlc --version` uses Cargo package metadata. |
 | Runtime | Immediate acknowledged writes | Done | Automated + hardware | Ring, button, restore, and reset writes were acknowledged and re-read on A068. |
@@ -56,8 +57,8 @@ resulting focus or camera behavior was measured optically.
 
 ## Remaining Work
 
-- Firmware update support requires a separate, authoritative firmware image
-  format and safety specification before implementation.
+- Recovery update support remains deferred until its CLI safety and hardware
+  verification procedure are specified.
 
 ## Hardware Test Record
 
@@ -67,6 +68,8 @@ firmware 01.00) connected as `/dev/ttyUSB0`.
 - Discovery, automatic selection, serial selection, and port selection passed.
 - Identity, capabilities, current settings, `-v`, `-vv`, and explicit
   disconnect passed.
+- `firmware check` fetched the A068SE manifest over HTTPS, reported installed
+  `01` and available `03`, and completed the explicit disconnect.
 - Backup creation, existing-file refusal, restore confirmation, restore,
   factory-reset confirmation, and factory reset passed.
 - Every setting advertised by this A068 was written and read back: all three
@@ -78,3 +81,15 @@ firmware 01.00) connected as `/dev/ttyUSB0`.
   button functions cannot be hardware-tested with A068 because it does not
   advertise them. Camera-attached, recovery, and hot-unplug paths also remain
   automated-only because those states were not available during this run.
+
+Firmware update tested on 2026-08-12 with the same A068 lens:
+
+- `firmware update --force` downloaded and validated `A068SE_0300.tfwf`, then
+  transferred the ordinary `(device 0, area 0)` image. All 511 data blocks were
+  acknowledged and the EOT handshake completed.
+- A subsequent `firmware check` reported installed and available version `03`,
+  with status `up to date`.
+- A subsequent `tlc info` reported firmware `03.00`, a standalone connection,
+  readable settings, and a clean explicit disconnect.
+- Staged area-2 re-enumeration, recovery updates, and transfer failure paths
+  have not been hardware-tested.
