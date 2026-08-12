@@ -1,6 +1,6 @@
 [package]
 name = "tamron-lens-control"
-version = "0.1.0"
+version = "0.1.1-dev"
 edition = "2024"
 description = "Stateless Linux CLI and Rust library for configuring compatible Tamron lenses"
 license = "GPL-3.0-or-later"
