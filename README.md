@@ -15,6 +15,8 @@ Build and install from this repository with a recent Rust toolchain:
 cargo install --path .
 ```
 
+You can also find a portable binary in GitHub Release.
+
 Connect the lens directly over USB, then confirm that `tlc` can see it:
 
 ```bash
