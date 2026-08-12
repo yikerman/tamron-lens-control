@@ -65,7 +65,4 @@ Call out real-hardware setting changes and restoration results.
 
 Treat `PROTOCOL.md` `PROTOCOL_UPDATEFW.md` as the source of truth. Preserve the
 stateless lifecycle, capability checks, no-retry behavior, and explicit
-disconnect. The ordinary network update path is implemented and hardware-tested
-for an A068 `(device 0, area 0)` image. Its staged re-enumeration path remains
-automated-only. Recovery and local raw-image firmware paths remain deferred until
-their CLI safety rules and hardware verification procedure are specified.
+disconnect.

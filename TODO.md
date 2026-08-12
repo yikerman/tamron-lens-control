@@ -3,7 +3,7 @@
 This table tracks the user-facing feature areas of the protocol-defined lens
 feature set and their status in the stateless Linux CLI. "Automated" means
 covered by a fake transport, parser, or domain test; "hardware" names behavior
-exercised on the connected A068 lens. Hardware write verification means the
+exercised on the connected A068 or A075 lens. Hardware write verification means the
 setting was written, read back, and restored; it does not claim that the
 resulting focus or camera behavior was measured optically.
 
@@ -44,8 +44,8 @@ resulting focus or camera behavior was measured optically.
 | Button | Shared-byte conflict protection | Done | Automated | Conflicting speed/move-count interpretations are rejected. |
 | Focus calibration | Focus-point correction | Done | Automated | Signed value bounded by descriptor half-range. |
 | Firmware | Installed firmware version | Done | Hardware | Network-free local descriptor value. |
-| Firmware | Latest-version network check | Done | Automated + hardware | A068 reported installed `01`, available `03` before updating, then installed and available `03` afterward; both checks disconnected normally. |
-| Firmware | Normal network update | Done | Automated + hardware (ordinary path) | A068 updated from `01.00` to `03.00` using the ordinary `(device 0, area 0)` path. Exact-serial staged rediscovery is implemented but not hardware-tested. |
+| Firmware | Latest-version network check | Done | Automated + hardware | A068 and A075 checks reported the expected installed and available versions and disconnected normally. |
+| Firmware | Normal network update | Done | Automated + hardware | A068 updated from `01.00` to `03.00` using `(device 0, area 0)`; A075 updated from `02.00` to `03.01` using staged rediscovery and `(device 0, area 2)`. |
 | Firmware | Local update and safe-mode recovery | Deferred | N/A | Future `firmware recovery-update`; raw maintenance images need independent model, target, size, and hash controls. |
 | Online | Function list, browser links, privacy, download site | Deferred | N/A | GUI/network navigation is outside the CLI v1 scope. |
 | Utility | CLI software version | Done | Help reviewed | `tlc --version` uses Cargo package metadata. |
@@ -91,5 +91,17 @@ Firmware update tested on 2026-08-12 with the same A068 lens:
   with status `up to date`.
 - A subsequent `tlc info` reported firmware `03.00`, a standalone connection,
   readable settings, and a clean explicit disconnect.
-- Staged area-2 re-enumeration, recovery updates, and transfer failure paths
-  have not been hardware-tested.
+- Recovery updates and transfer failure paths have not been hardware-tested.
+
+Staged firmware update tested on 2026-08-12 with an A075 (25-200mm F/2.8-5.6
+Di III VXD G2, Sony E, firmware 02.00) connected as `/dev/ttyUSB0`:
+
+- `firmware check` fetched the A075SE manifest, reported installed version `02`
+  and available version `03`, then disconnected normally.
+- `firmware update` downloaded and validated `A075SE_0301.tfwf`. The initial
+  transfer request caused the expected mode change; the CLI rediscovered the
+  lens at `/dev/ttyUSB0`, reconnected, and restarted the transfer request.
+- The staged `(device 0, area 2)` image transferred all 1,041,408 bytes and
+  completed its EOT handshake.
+- A subsequent `tlc info` reported firmware `03.01`, a standalone connection,
+  readable settings, and a clean explicit disconnect.
