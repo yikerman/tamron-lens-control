@@ -102,7 +102,7 @@ tlc checks that a backup is undamaged and was made for the same lens model. Rest
     /// Check for or install lens firmware from Tamron's update service.
     #[command(
         subcommand,
-        long_about = "Check the firmware advertised for the connected lens or install it over USB. Updating firmware can make the lens unusable if power or USB is interrupted. Save your settings first and keep the lens connected until tlc finishes."
+        long_about = "Check the firmware advertised for the connected lens or install it over USB. Updating firmware can make the lens unusable if power or USB is interrupted. Keep the lens connected until tlc finishes."
     )]
     Firmware(FirmwareCommand),
 }

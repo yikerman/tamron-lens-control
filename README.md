@@ -53,48 +53,22 @@ tlc button set focus function focus-preset
 # Fine-tune autofocus accuracy
 tlc focus-calibration set 2
 
+# Check for possible firmware updates
+tlc firmware check
+
+# ..and execute the update
+tlc firmware update
+
+# Save and reload settings
+tlc settings save my-lens.tlc
+tlc settings load my-lens.tlc
+
 ## some more.. see tlc --help
 ```
 
 Run `tlc --help` or add `--help` after any command for available settings, accepted values, and lens-specific requirements.
 
 Place `-v` before the command to show each operation sent to the lens, and `-vv` to also print all raw transmitted and received bytes in hexadecimal.
-
-## Backups
-
-Back up all current settings before making extensive changes:
-
-```bash
-tlc settings save my-lens.tlc
-tlc settings load my-lens.tlc
-```
-
-Backup files can be restored only to the same lens model.
-
-## Firmware
-
-Check the firmware advertised for the connected lens without changing it:
-
-```bash
-tlc firmware check
-```
-
-Before updating, save the current settings and connect the lens directly over
-USB. Firmware updates require the lens to expose a USB serial number so tlc can
-identify the same lens if it re-enumerates during the transfer.
-
-```bash
-tlc settings save before-firmware.tlc
-tlc firmware update
-```
-
-The update command shows the connected model, mount, installed firmware, and
-advertised firmware before asking for confirmation. Use `--yes` to skip the
-prompt or `--force` to reinstall an advertised version that matches the
-installed display version. Keep power and USB connected until the command
-finishes. Afterward, reconnect the lens and run `tlc info` to verify it.
-
-Recovery-mode and local raw-image firmware installation are not exposed.
 
 ## Linux Driver Setup
 
@@ -168,5 +142,3 @@ Note that group membership grants access to every device owned by `dialout`, not
 - Keep the lens connected until a command finishes.
 - Review a setting with its `get` command before changing it.
 - Use `settings save` before loading another backup or performing a reset.
-- Back up settings before firmware updates and do not interrupt power or USB.
-- Recovery-mode and local raw-image firmware installation remain unsupported.

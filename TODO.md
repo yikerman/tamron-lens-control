@@ -12,7 +12,6 @@ resulting focus or camera behavior was measured optically.
 | Platform | Linux-only CLI and reusable Rust library | Done | Automated | Non-Linux builds fail explicitly. |
 | Start | Device discovery and selection | Done | Automated + hardware | `devices`; USB serial preferred, port path fallback. |
 | Start | Connection safety notice | Done | Help reviewed | Captured in detailed clap help instead of a welcome screen. |
-| Start | Remember/suppress welcome screen | Deferred | N/A | Stateless CLI keeps no preferences. |
 | Connection | Standalone connect and initial data load | Done | Automated + hardware | Descriptor plus settings blocks 0 and 1. |
 | Connection | Camera-attached connect and attempted writes | Done | Automated | Result `0x83` is surfaced contextually. |
 | Connection | Recovery-mode firmware prompt | Deferred | N/A | Reserve `tlc firmware recovery-update`; normal connected updates do not enter recovery flow. |
@@ -53,7 +52,6 @@ resulting focus or camera behavior was measured optically.
 | Runtime | Verbose command and raw frame diagnostics | Done | Automated + hardware | Top-level `-v` logged operations; `-vv` displayed complete TX/RX frames from A068. |
 | Runtime | Hot unplug and lens communication errors | Done | Automated | Reported as runtime errors; no persistent monitor is needed. |
 | Runtime | Close protection | Done | Automated + hardware | Successful and rejected A068 commands sent the explicit disconnect where a session was established. |
-| Appearance | Light/dark theme and accent colors | Deferred | N/A | Not applicable to a plain-text CLI. |
 
 ## Remaining Work
 
